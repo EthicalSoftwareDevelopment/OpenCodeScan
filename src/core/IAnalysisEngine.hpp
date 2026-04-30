@@ -4,6 +4,8 @@ namespace opencodescan {
 class IAnalysisEngine {
 public:
     virtual ~IAnalysisEngine() = default;
-    [[nodiscard]] virtual AnalysisResult analyzeProject(const AnalysisRequest& request) = 0;
+    [[nodiscard]] virtual AnalysisResult analyzeProject(const AnalysisRequest& request,
+                                                        const ProgressCallback& progressCallback = {},
+                                                        const CancelToken& cancelToken = {}) = 0;
 };
 } // namespace opencodescan

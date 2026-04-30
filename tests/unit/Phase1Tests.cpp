@@ -1,7 +1,6 @@
 ﻿#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
-#include <QSettings>
 #include <QTemporaryDir>
 #include <exception>
 #include <functional>
@@ -9,7 +8,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include "analysis/MockAnalysisEngine.hpp"
+#include "analysis/CompileCommandsLoader.hpp"
+#include "analysis/DeterministicAnalysisEngine.hpp"
+#include "analysis/ProjectFileDiscoverer.hpp"
 #include "core/Diagnostic.hpp"
 #include "core/SettingsService.hpp"
 #include "ui/DiagnosticsTableModel.hpp"
@@ -24,10 +25,17 @@ void requireEqual(const QString& actual, const QString& expected, const char* me
         throw std::runtime_error(std::string(message) + " | expected='" + expected.toStdString() + "' actual='" + actual.toStdString() + "'");
     }
 }
-void requireEqual(const int actual, const int expected, const char* message) {
+void requireEqual(int actual, int expected, const char* message) {
     if (actual != expected) {
         throw std::runtime_error(std::string(message) + " | expected=" + std::to_string(expected) + " actual=" + std::to_string(actual));
     }
+}
+QString createTextFile(const QString& path, const QByteArray& contents) {
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly | QIODevice::Text), "Fixture file should be writable");
+    file.write(contents);
+    file.close();
+    return path;
 }
 void testSeverityDisplayString() {
     using opencodescan::Severity;
@@ -37,63 +45,104 @@ void testSeverityDisplayString() {
     requireEqual(toDisplayString(Severity::Error), QStringLiteral("Error"), "Severity::Error should map to Error");
     requireEqual(toDisplayString(Severity::Critical), QStringLiteral("Critical"), "Severity::Critical should map to Critical");
 }
-void testMockAnalysisEngineRejectsEmptyPath() {
-    opencodescan::MockAnalysisEngine engine;
-    const auto result = engine.analyzeProject({});
-    require(result.diagnostics.isEmpty(), "Empty project path should not produce diagnostics");
-    requireEqual(result.notes.value(0), QStringLiteral("No project path selected."), "Empty project path should produce the expected note");
-}
-void testMockAnalysisEngineRejectsMissingDirectory() {
-    opencodescan::MockAnalysisEngine engine;
-    opencodescan::AnalysisRequest request;
-    request.projectRootPath = QStringLiteral("C:/__opencodescan_missing_project__");
-    const auto result = engine.analyzeProject(request);
-    require(result.diagnostics.isEmpty(), "Missing project path should not produce diagnostics");
-    requireEqual(result.notes.value(0), QStringLiteral("Selected project path does not exist."), "Missing project path should produce the expected note");
-}
-void testMockAnalysisEngineFindsSourceAndWarnsWhenCompileCommandsMissing() {
+void testProjectFileDiscovererFindsSortedSourceFiles() {
     QTemporaryDir projectDir;
-    require(projectDir.isValid(), "Temporary directory for project fixture should be created");
-    QFile sourceFile(projectDir.filePath(QStringLiteral("main.cpp")));
-    require(sourceFile.open(QIODevice::WriteOnly | QIODevice::Text), "Source fixture should be writable");
-    sourceFile.write("int main() { return 0; }\n");
-    sourceFile.close();
-    opencodescan::MockAnalysisEngine engine;
+    require(projectDir.isValid(), "Project fixture directory should exist");
+    createTextFile(projectDir.filePath(QStringLiteral("zeta.cpp")), "int zeta();\n");
+    createTextFile(projectDir.filePath(QStringLiteral("Alpha.hpp")), "#pragma once\n");
+    QDir().mkpath(projectDir.filePath(QStringLiteral("ignored/sub")));
+    createTextFile(projectDir.filePath(QStringLiteral("ignored/sub/skip.cpp")), "int skip();\n");
     opencodescan::AnalysisRequest request;
     request.projectRootPath = projectDir.path();
-    const auto result = engine.analyzeProject(request);
-    requireEqual(result.diagnostics.size(), 2, "Source project without compile_commands.json should produce two diagnostics");
-    requireEqual(result.diagnostics.at(0).ruleId, QStringLiteral("OCS-PHASE1"), "First diagnostic should be the Phase 1 shell marker");
-    requireEqual(QDir::cleanPath(result.diagnostics.at(0).filePath), QDir::cleanPath(sourceFile.fileName()), "Phase 1 diagnostic should point at the representative source file");
-    requireEqual(result.diagnostics.at(1).ruleId, QStringLiteral("OCS-CONFIG"), "Second diagnostic should warn about missing compile_commands.json");
-    require(result.notes.value(0).contains(QStringLiteral("Loaded project root:")), "Project scan note should describe the loaded root");
+    request.excludedPaths = {QStringLiteral("ignored")};
+    opencodescan::ProjectFileDiscoverer discoverer;
+    const auto files = discoverer.discover(request);
+    requireEqual(files.size(), 2, "Discoverer should skip excluded paths");
+    require(files.at(0).endsWith(QStringLiteral("Alpha.hpp")), "Files should be returned in deterministic sorted order");
+    require(files.at(1).endsWith(QStringLiteral("zeta.cpp")), "Files should include remaining source files");
 }
-void testMockAnalysisEngineHonorsCompileCommandsAndEmptySourceTree() {
+void testCompileCommandsLoaderParsesArguments() {
     QTemporaryDir projectDir;
-    require(projectDir.isValid(), "Temporary directory for compile_commands fixture should be created");
-    QFile compileCommands(projectDir.filePath(QStringLiteral("compile_commands.json")));
-    require(compileCommands.open(QIODevice::WriteOnly | QIODevice::Text), "compile_commands.json fixture should be writable");
-    compileCommands.write("[]\n");
-    compileCommands.close();
-    opencodescan::MockAnalysisEngine engine;
+    require(projectDir.isValid(), "compile_commands fixture directory should exist");
+    createTextFile(projectDir.filePath(QStringLiteral("main.cpp")), "int main() { return 0; }\n");
+    createTextFile(projectDir.filePath(QStringLiteral("compile_commands.json")),
+                   "[{\"directory\":\"" + projectDir.path().toUtf8() + "\",\"file\":\"main.cpp\",\"arguments\":[\"clang++\",\"-Iinclude\",\"-DDEBUG\",\"main.cpp\"]}]\n");
+    opencodescan::CompileCommandsLoader loader;
+    const auto result = loader.load(projectDir.path());
+    const auto filePath = QDir(projectDir.path()).filePath(QStringLiteral("main.cpp"));
+    require(!result.compileCommandsPath.isEmpty(), "Loader should find compile_commands.json");
+    require(result.translationUnitsByFile.contains(QDir::cleanPath(filePath)), "Loader should register a translation unit for the source file");
+    const auto translationUnit = result.translationUnitsByFile.value(QDir::cleanPath(filePath));
+    require(translationUnit.fromCompileCommands, "Translation unit should be marked as originating from compile_commands.json");
+    require(translationUnit.includePaths.contains(QDir(projectDir.path()).filePath(QStringLiteral("include"))), "Include path should be normalized relative to the working directory");
+    require(translationUnit.defines.contains(QStringLiteral("DEBUG")), "Preprocessor defines should be extracted from compiler arguments");
+}
+void testDeterministicAnalysisEngineBuildsTranslationUnitsAndWarnings() {
+    QTemporaryDir projectDir;
+    require(projectDir.isValid(), "Engine fixture directory should exist");
+    createTextFile(projectDir.filePath(QStringLiteral("alpha.cpp")), "int alpha() { return 1; }\n");
+    createTextFile(projectDir.filePath(QStringLiteral("beta.hpp")), "#pragma once\n");
+    createTextFile(projectDir.filePath(QStringLiteral("compile_commands.json")),
+                   "[{\"directory\":\"" + projectDir.path().toUtf8() + "\",\"file\":\"alpha.cpp\",\"arguments\":[\"clang++\",\"-Iinclude\",\"-DDEBUG\",\"alpha.cpp\"]}]\n");
+    opencodescan::DeterministicAnalysisEngine engine;
     opencodescan::AnalysisRequest request;
     request.projectRootPath = projectDir.path();
-    const auto result = engine.analyzeProject(request);
-    requireEqual(result.diagnostics.size(), 2, "Empty source tree with compile_commands.json should produce two diagnostics");
-    requireEqual(result.diagnostics.at(0).ruleId, QStringLiteral("OCS-PHASE1"), "First diagnostic should still be the Phase 1 shell marker");
-    requireEqual(result.diagnostics.at(1).ruleId, QStringLiteral("OCS-EMPTY"), "Second diagnostic should note the empty source tree");
-    require(result.notes.contains(QStringLiteral("Found compile_commands.json for future parser integration.")), "Scan notes should acknowledge compile_commands.json");
+    request.includePaths = {QStringLiteral("manual/include")};
+    std::vector<opencodescan::ScanProgress> progressEvents;
+    const auto result = engine.analyzeProject(request,
+                                              [&progressEvents](const opencodescan::ScanProgress& progress) {
+                                                  progressEvents.push_back(progress);
+                                              });
+    requireEqual(result.summary.discoveredFileCount, 2, "Engine should discover both C/C++ files");
+    requireEqual(result.summary.translationUnitCount, 2, "Engine should prepare a translation unit for each discovered file");
+    requireEqual(result.summary.compileCommandEntryCount, 1, "Engine should record compile_commands.json coverage");
+    requireEqual(result.summary.filesWithoutCompileCommands, 1, "Engine should count files without compile command coverage");
+    require(!result.translationUnits.isEmpty(), "Engine should return translation units");
+    require(result.translationUnits.at(0).fromCompileCommands, "First translation unit should come from compile_commands.json");
+    require(result.diagnostics.size() >= 2, "Engine should emit summary diagnostics");
+    requireEqual(result.diagnostics.at(0).ruleId, QStringLiteral("OCS-SCAN"), "First diagnostic should summarize the prepared translation units");
+    require(progressEvents.size() >= 3, "Engine should report progress through the analysis pipeline");
+    require(progressEvents.back().state == opencodescan::ScanState::Completed, "Final progress event should mark the scan as completed");
 }
-void testSettingsServicePersistsNormalizedProjectPath() {
+void testDeterministicAnalysisEngineSupportsCancellation() {
+    QTemporaryDir projectDir;
+    require(projectDir.isValid(), "Cancellation fixture directory should exist");
+    createTextFile(projectDir.filePath(QStringLiteral("alpha.cpp")), "int alpha() { return 1; }\n");
+    createTextFile(projectDir.filePath(QStringLiteral("beta.cpp")), "int beta() { return 2; }\n");
+    opencodescan::DeterministicAnalysisEngine engine;
+    opencodescan::AnalysisRequest request;
+    request.projectRootPath = projectDir.path();
+    auto cancelToken = std::make_shared<std::atomic_bool>(false);
+    int progressCount = 0;
+    const auto result = engine.analyzeProject(request,
+                                              [&cancelToken, &progressCount](const opencodescan::ScanProgress& progress) {
+                                                  ++progressCount;
+                                                  if (progress.state == opencodescan::ScanState::BuildingTranslationUnits
+                                                      && progress.processedFiles == 0) {
+                                                      cancelToken->store(true);
+                                                  }
+                                              },
+                                              cancelToken);
+    require(result.summary.cancelled, "Cancellation token should stop the deterministic scan");
+    require(result.summary.translationUnitCount < 2, "Cancelled scan should stop before processing all files");
+    require(progressCount > 0, "Cancellation test should still observe progress events");
+}
+void testSettingsServicePersistsPhaseTwoSettings() {
     const auto organizationName = QStringLiteral("OpenCodeScanTests");
-    const auto applicationName = QStringLiteral("SettingsServicePhase1Test");
+    const auto applicationName = QStringLiteral("SettingsServicePhase2Test");
     QSettings cleanup(organizationName, applicationName);
     cleanup.clear();
     cleanup.sync();
     opencodescan::SettingsService writer(organizationName, applicationName);
-    writer.setLastProjectPath(QStringLiteral("C:/Temp/../Temp/OpenCodeScanProject"));
+    writer.setLastProjectPath(QStringLiteral("C:/Temp/OpenCodeScanProject"));
+    writer.setScanIncludePaths({QStringLiteral("include"), QStringLiteral("include")});
+    writer.setScanDefines({QStringLiteral("DEBUG"), QStringLiteral("DEBUG")});
+    writer.setExcludedPaths({QStringLiteral("build"), QStringLiteral("build")});
     opencodescan::SettingsService reader(organizationName, applicationName);
-    requireEqual(reader.lastProjectPath(), QStringLiteral("C:/Temp/OpenCodeScanProject"), "SettingsService should persist a normalized project path");
+    requireEqual(reader.lastProjectPath(), QStringLiteral("C:/Temp/OpenCodeScanProject"), "SettingsService should persist the last project path");
+    requireEqual(reader.scanIncludePaths().size(), 1, "SettingsService should deduplicate include paths");
+    requireEqual(reader.scanDefines().size(), 1, "SettingsService should deduplicate defines");
+    requireEqual(reader.excludedPaths().size(), 1, "SettingsService should deduplicate excluded paths");
     cleanup.clear();
     cleanup.sync();
 }
@@ -127,11 +176,11 @@ int main(int argc, char* argv[]) {
     QCoreApplication application(argc, argv);
     const std::vector<std::pair<const char*, std::function<void()>>> tests {
         {"Severity display strings", testSeverityDisplayString},
-        {"Mock analysis engine rejects empty path", testMockAnalysisEngineRejectsEmptyPath},
-        {"Mock analysis engine rejects missing directory", testMockAnalysisEngineRejectsMissingDirectory},
-        {"Mock analysis engine warns when compile commands are missing", testMockAnalysisEngineFindsSourceAndWarnsWhenCompileCommandsMissing},
-        {"Mock analysis engine handles compile commands and empty source tree", testMockAnalysisEngineHonorsCompileCommandsAndEmptySourceTree},
-        {"Settings service persists normalized project path", testSettingsServicePersistsNormalizedProjectPath},
+        {"Project file discoverer finds sorted files", testProjectFileDiscovererFindsSortedSourceFiles},
+        {"Compile commands loader parses arguments", testCompileCommandsLoaderParsesArguments},
+        {"Deterministic analysis engine builds translation units", testDeterministicAnalysisEngineBuildsTranslationUnitsAndWarnings},
+        {"Deterministic analysis engine supports cancellation", testDeterministicAnalysisEngineSupportsCancellation},
+        {"Settings service persists phase two settings", testSettingsServicePersistsPhaseTwoSettings},
         {"Diagnostics table model exposes diagnostic data", testDiagnosticsTableModelExposesDiagnosticData}
     };
     int failures = 0;
@@ -148,6 +197,6 @@ int main(int argc, char* argv[]) {
         std::cerr << failures << " test(s) failed." << std::endl;
         return 1;
     }
-    std::cout << "All Phase 1 unit tests passed." << std::endl;
+    std::cout << "All OpenCodeScan unit tests passed." << std::endl;
     return 0;
 }

@@ -5,7 +5,7 @@
 ```text
 OpenCodeScan/
   CMakeLists.txt
-  main.cpp                      # temporary entrypoint (to be moved into src/app)
+  main.cpp                      # legacy bootstrap file kept outside the active target
   README.md
   cmake/
   docs/
@@ -14,11 +14,31 @@ OpenCodeScan/
       non-functional-requirements.md
     architecture/
       folder-structure.md
+    ai-phased-implementation-plan.md
   src/
     app/                        # app bootstrap and startup wiring
+      main.cpp
+      ApplicationBootstrap.hpp
+      ApplicationBootstrap.cpp
     ui/                         # Qt widgets/windows/models for presentation
+      MainWindow.hpp
+      MainWindow.cpp
+      DiagnosticsTableModel.hpp
+      DiagnosticsTableModel.cpp
     analysis/                   # static analysis pipeline and rule execution
+      MockAnalysisEngine.hpp
+      MockAnalysisEngine.cpp
     core/                       # shared domain models and services
+      Diagnostic.hpp
+      IAnalysisEngine.hpp
+      IDiagnosticsModel.hpp
+      IReportExporter.hpp
+      IAiAdvisor.hpp
+      IHintProvider.hpp
+      Logging.hpp
+      Logging.cpp
+      SettingsService.hpp
+      SettingsService.cpp
   include/
     opencodescan/               # public headers (if needed for modularization)
   resources/
@@ -39,5 +59,5 @@ OpenCodeScan/
 - `tests` can reference all runtime modules.
 
 ## Next Refactor Step
-Move `main.cpp` to `src/app/main.cpp` and update `CMakeLists.txt` to use module-based sources.
+Begin Phase 2 by replacing `MockAnalysisEngine` with a real project scanner + parser integration while keeping the UI and core contracts stable.
 

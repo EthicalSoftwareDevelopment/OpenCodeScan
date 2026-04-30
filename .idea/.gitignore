@@ -8,3 +8,9 @@
 # Datasource local storage ignored files
 /dataSources/
 /dataSources.local.xml
+/editor.xml
+/misc.xml
+/modules.xml
+/OpenCodeScan.iml
+/QtSettings.xml
+/vcs.xml

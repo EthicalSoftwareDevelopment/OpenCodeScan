@@ -7,6 +7,7 @@ constexpr auto kLastProjectPath = "project/lastPath";
 constexpr auto kScanIncludePaths = "scan/includePaths";
 constexpr auto kScanDefines = "scan/defines";
 constexpr auto kScanExcludedPaths = "scan/excludedPaths";
+constexpr auto kEnabledRuleIds = "scan/enabledRuleIds";
 }
 SettingsService::SettingsService(const QString& organizationName, const QString& applicationName)
     : settings_(organizationName.isEmpty() ? QCoreApplication::organizationName() : organizationName,
@@ -37,6 +38,12 @@ QStringList SettingsService::excludedPaths() const {
 void SettingsService::setExcludedPaths(const QStringList& excludedPaths) {
     setValueList(QLatin1String(kScanExcludedPaths), excludedPaths);
 }
+QStringList SettingsService::enabledRuleIds() const {
+    return valueList(QLatin1String(kEnabledRuleIds));
+}
+void SettingsService::setEnabledRuleIds(const QStringList& ruleIds) {
+    setValueList(QLatin1String(kEnabledRuleIds), ruleIds);
+}
 QStringList SettingsService::valueList(const QString& key) const {
     return settings_.value(key).toStringList();
 }
@@ -46,7 +53,7 @@ void SettingsService::setValueList(const QString& key, const QStringList& values
     for (const auto& value : values) {
         const auto trimmed = value.trimmed();
         if (!trimmed.isEmpty()) {
-            normalizedValues << QDir::cleanPath(trimmed);
+            normalizedValues << trimmed;
         }
     }
     normalizedValues.removeDuplicates();

@@ -1,10 +1,15 @@
 ﻿#include "analysis/DeterministicAnalysisEngine.hpp"
+
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QStringList>
+
 namespace opencodescan {
 namespace {
+
 Diagnostic makeDiagnostic(QString ruleId,
                           Severity severity,
                           QString filePath,
@@ -22,27 +27,51 @@ Diagnostic makeDiagnostic(QString ruleId,
     diagnostic.remediationHint = std::move(remediationHint);
     return diagnostic;
 }
+
+PreparedSourceFile makePreparedSourceFile(const TranslationUnitConfig& translationUnit,
+                                          const QString& sourceText) {
+    PreparedSourceFile preparedSourceFile;
+    preparedSourceFile.translationUnit = translationUnit;
+    preparedSourceFile.sourceText = sourceText;
+    preparedSourceFile.sourceLines = sourceText.split(QRegularExpression(QStringLiteral("\\r?\\n")));
+    return preparedSourceFile;
+}
+
 } // namespace
+
+QVector<RuleMetadata> DeterministicAnalysisEngine::availableRules() const {
+    return ruleRegistry_.availableRules();
+}
+
 AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest& request,
                                                            const ProgressCallback& progressCallback,
                                                            const CancelToken& cancelToken) {
     AnalysisResult result;
+    result.projectRootPath = QDir::cleanPath(request.projectRootPath);
+    result.generatedAtUtc = QDateTime::currentDateTimeUtc();
+    result.availableRules = availableRules();
+    result.enabledRuleIds = request.enabledRuleIds.isEmpty() ? ruleRegistry_.defaultEnabledRuleIds() : request.enabledRuleIds;
+    result.summary.executedRuleCount = result.enabledRuleIds.size();
+
     reportProgress(progressCallback,
                    ScanState::Preparing,
                    0,
                    0,
                    {},
                    QStringLiteral("Validating project path."));
+
     if (request.projectRootPath.trimmed().isEmpty()) {
         result.notes << QStringLiteral("No project path selected.");
         return result;
     }
+
     const auto normalizedRootPath = QDir::cleanPath(request.projectRootPath);
     const QDir projectDirectory(normalizedRootPath);
     if (!projectDirectory.exists()) {
         result.notes << QStringLiteral("Selected project path does not exist.");
         return result;
     }
+
     reportProgress(progressCallback,
                    ScanState::LoadingCompileCommands,
                    0,
@@ -54,6 +83,7 @@ AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest
         : CompileCommandsLoadResult {};
     result.notes << compileCommandsResult.notes;
     result.summary.compileCommandEntryCount = compileCommandsResult.translationUnitsByFile.size();
+
     reportProgress(progressCallback,
                    ScanState::DiscoveringFiles,
                    0,
@@ -62,10 +92,15 @@ AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest
                    QStringLiteral("Discovering C/C++ files."));
     AnalysisRequest normalizedRequest = request;
     normalizedRequest.projectRootPath = normalizedRootPath;
+    normalizedRequest.enabledRuleIds = result.enabledRuleIds;
     const auto discoveredFiles = fileDiscoverer_.discover(normalizedRequest);
     result.summary.discoveredFileCount = discoveredFiles.size();
+
+    const auto enabledRules = ruleRegistry_.enabledRules(result.enabledRuleIds);
+
     int filesWithoutCompileCommands = 0;
     int processedFiles = 0;
+
     for (const auto& filePath : discoveredFiles) {
         if (isCancellationRequested(cancelToken)) {
             result.summary.cancelled = true;
@@ -78,12 +113,14 @@ AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest
                            QStringLiteral("Cancelling scan."));
             break;
         }
+
         reportProgress(progressCallback,
                        ScanState::BuildingTranslationUnits,
                        discoveredFiles.size(),
                        processedFiles,
                        filePath,
                        QStringLiteral("Preparing translation unit configuration."));
+
         bool hasCompileCommand = false;
         const auto translationUnit = makeTranslationUnitConfig(filePath,
                                                                normalizedRequest,
@@ -92,6 +129,7 @@ AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest
         if (!hasCompileCommand) {
             ++filesWithoutCompileCommands;
         }
+
         QFile sourceFile(filePath);
         if (!sourceFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
             result.diagnostics.push_back(makeDiagnostic(QStringLiteral("OCS-FILE-OPEN"),
@@ -99,19 +137,42 @@ AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest
                                                         filePath,
                                                         QStringLiteral("Unable to read source file while preparing translation unit configuration."),
                                                         QStringLiteral("Verify file permissions and that the file still exists.")));
+            ++processedFiles;
+            continue;
         }
+
+        const auto sourceText = QString::fromUtf8(sourceFile.readAll());
         result.translationUnits.push_back(translationUnit);
+
+        reportProgress(progressCallback,
+                       ScanState::ExecutingRules,
+                       discoveredFiles.size(),
+                       processedFiles,
+                       filePath,
+                       QStringLiteral("Executing enabled rules."));
+
+        const auto preparedSourceFile = makePreparedSourceFile(translationUnit, sourceText);
+        for (const auto& rule : enabledRules) {
+            const auto diagnostics = rule->run(preparedSourceFile);
+            result.summary.emittedRuleDiagnostics += diagnostics.size();
+            result.diagnostics += diagnostics;
+        }
+
         ++processedFiles;
     }
+
     result.summary.translationUnitCount = result.translationUnits.size();
     result.summary.filesWithoutCompileCommands = filesWithoutCompileCommands;
+
     result.diagnostics.push_back(makeDiagnostic(QStringLiteral("OCS-SCAN"),
                                                 Severity::Info,
                                                 normalizedRootPath,
-                                                QStringLiteral("Prepared %1 translation units across %2 discovered C/C++ files.")
+                                                QStringLiteral("Prepared %1 translation units across %2 discovered C/C++ files and executed %3 rules.")
                                                     .arg(result.summary.translationUnitCount)
-                                                    .arg(result.summary.discoveredFileCount),
-                                                QStringLiteral("Phase 3 builds on these deterministic translation unit inputs to run rule-based analysis.")));
+                                                    .arg(result.summary.discoveredFileCount)
+                                                    .arg(result.summary.executedRuleCount),
+                                                QStringLiteral("Phase 3 now runs the enabled rule set over the deterministic translation unit inputs.")));
+
     if (compileCommandsResult.compileCommandsPath.isEmpty()) {
         result.diagnostics.push_back(makeDiagnostic(QStringLiteral("OCS-COMPILE-COMMANDS"),
                                                     Severity::Warning,
@@ -126,6 +187,7 @@ AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest
                                                         .arg(filesWithoutCompileCommands),
                                                     QStringLiteral("Ensure your build exports compile commands for all relevant translation units or provide manual include paths and defines.")));
     }
+
     if (result.summary.cancelled) {
         result.diagnostics.push_back(makeDiagnostic(QStringLiteral("OCS-CANCELLED"),
                                                     Severity::Info,
@@ -134,9 +196,13 @@ AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest
                                                         .arg(result.summary.translationUnitCount),
                                                     QStringLiteral("Restart the scan when you are ready to finish preparing the remaining files.")));
     }
+
     result.notes << QStringLiteral("Discovered %1 C/C++ files.").arg(result.summary.discoveredFileCount);
     result.notes << QStringLiteral("Prepared %1 translation unit configurations.").arg(result.summary.translationUnitCount);
+    result.notes << QStringLiteral("Enabled rules: %1.").arg(result.enabledRuleIds.join(QStringLiteral(", ")));
+    result.notes << QStringLiteral("Rule diagnostics emitted: %1.").arg(result.summary.emittedRuleDiagnostics);
     result.notes << QStringLiteral("Files without compile command coverage: %1.").arg(result.summary.filesWithoutCompileCommands);
+
     reportProgress(progressCallback,
                    result.summary.cancelled ? ScanState::Cancelled : ScanState::Completed,
                    discoveredFiles.size(),
@@ -145,6 +211,7 @@ AnalysisResult DeterministicAnalysisEngine::analyzeProject(const AnalysisRequest
                    result.summary.cancelled ? QStringLiteral("Scan cancelled.") : QStringLiteral("Scan completed."));
     return result;
 }
+
 TranslationUnitConfig DeterministicAnalysisEngine::makeTranslationUnitConfig(
     const QString& filePath,
     const AnalysisRequest& request,
@@ -184,6 +251,7 @@ TranslationUnitConfig DeterministicAnalysisEngine::makeTranslationUnitConfig(
     config.workingDirectory = QFileInfo(filePath).absolutePath();
     return config;
 }
+
 void DeterministicAnalysisEngine::reportProgress(const ProgressCallback& progressCallback,
                                                  const ScanState state,
                                                  const int totalFiles,

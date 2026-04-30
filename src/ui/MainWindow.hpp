@@ -27,6 +27,8 @@ private:
     void browseForProject();
     void startScan();
     void cancelScan();
+    void exportJsonReport();
+    void exportHtmlReport();
     void handleScanFinished();
     void handleScanProgress(const opencodescan::ScanProgress& progress);
     void showAnalysisResult(const opencodescan::AnalysisResult& result);
@@ -34,15 +36,21 @@ private:
     [[nodiscard]] opencodescan::AnalysisRequest buildRequestFromUi() const;
     [[nodiscard]] QStringList parseMultiValue(const QString& text) const;
     [[nodiscard]] QString formatSummaryText(const opencodescan::AnalysisResult& result) const;
+    [[nodiscard]] QString availableRulesTooltip() const;
+    bool exportReport(bool exportHtml);
+
     opencodescan::SettingsService& settingsService_;
     opencodescan::IAnalysisEngine& analysisEngine_;
     QLineEdit* projectPathEdit_ {nullptr};
     QLineEdit* includePathsEdit_ {nullptr};
     QLineEdit* definesEdit_ {nullptr};
     QLineEdit* excludedPathsEdit_ {nullptr};
+    QLineEdit* enabledRulesEdit_ {nullptr};
     QPushButton* browseButton_ {nullptr};
     QPushButton* startScanButton_ {nullptr};
     QPushButton* cancelScanButton_ {nullptr};
+    QPushButton* exportJsonButton_ {nullptr};
+    QPushButton* exportHtmlButton_ {nullptr};
     QLabel* summaryLabel_ {nullptr};
     QLabel* progressLabel_ {nullptr};
     QProgressBar* progressBar_ {nullptr};
@@ -50,6 +58,7 @@ private:
     QTextEdit* detailsView_ {nullptr};
     DiagnosticsTableModel* diagnosticsModel_ {nullptr};
     QFutureWatcher<opencodescan::AnalysisResult>* scanWatcher_ {nullptr};
+    opencodescan::AnalysisResult lastResult_;
     opencodescan::CancelToken cancelToken_;
     bool scanInProgress_ {false};
 };

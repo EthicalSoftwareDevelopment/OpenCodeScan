@@ -2,6 +2,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <QDateTime>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -25,12 +26,32 @@ inline QString toDisplayString(const Severity severity) {
     }
     return QStringLiteral("Unknown");
 }
+enum class RuleCategory {
+    Correctness,
+    Safety,
+    Maintainability,
+    Performance
+};
+inline QString toDisplayString(const RuleCategory category) {
+    switch (category) {
+    case RuleCategory::Correctness:
+        return QStringLiteral("Correctness");
+    case RuleCategory::Safety:
+        return QStringLiteral("Safety");
+    case RuleCategory::Maintainability:
+        return QStringLiteral("Maintainability");
+    case RuleCategory::Performance:
+        return QStringLiteral("Performance");
+    }
+    return QStringLiteral("Unknown");
+}
 enum class ScanState {
     Idle,
     Preparing,
     DiscoveringFiles,
     LoadingCompileCommands,
     BuildingTranslationUnits,
+    ExecutingRules,
     Completed,
     Cancelled
 };
@@ -46,6 +67,8 @@ inline QString toDisplayString(const ScanState state) {
         return QStringLiteral("Loading compile commands");
     case ScanState::BuildingTranslationUnits:
         return QStringLiteral("Building translation units");
+    case ScanState::ExecutingRules:
+        return QStringLiteral("Executing rules");
     case ScanState::Completed:
         return QStringLiteral("Completed");
     case ScanState::Cancelled:
@@ -62,6 +85,14 @@ struct Diagnostic {
     QString message;
     QString remediationHint;
 };
+struct RuleMetadata {
+    QString id;
+    QString name;
+    QString description;
+    RuleCategory category {RuleCategory::Maintainability};
+    Severity defaultSeverity {Severity::Info};
+    bool enabledByDefault {true};
+};
 struct TranslationUnitConfig {
     QString filePath;
     QString workingDirectory;
@@ -75,6 +106,7 @@ struct AnalysisRequest {
     QStringList includePaths;
     QStringList defines;
     QStringList excludedPaths;
+    QStringList enabledRuleIds;
     bool preferCompileCommands {true};
 };
 struct ScanProgress {
@@ -89,11 +121,17 @@ struct AnalysisSummary {
     int translationUnitCount {0};
     int compileCommandEntryCount {0};
     int filesWithoutCompileCommands {0};
+    int executedRuleCount {0};
+    int emittedRuleDiagnostics {0};
     bool cancelled {false};
 };
 struct AnalysisResult {
+    QString projectRootPath;
+    QDateTime generatedAtUtc;
     QVector<Diagnostic> diagnostics;
     QVector<TranslationUnitConfig> translationUnits;
+    QVector<RuleMetadata> availableRules;
+    QStringList enabledRuleIds;
     QStringList notes;
     AnalysisSummary summary;
 };

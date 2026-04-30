@@ -14,6 +14,8 @@ public:
     void setScanDefines(const QStringList& defines);
     [[nodiscard]] QStringList excludedPaths() const;
     void setExcludedPaths(const QStringList& excludedPaths);
+    [[nodiscard]] QStringList enabledRuleIds() const;
+    void setEnabledRuleIds(const QStringList& ruleIds);
 private:
     [[nodiscard]] QStringList valueList(const QString& key) const;
     void setValueList(const QString& key, const QStringList& values);

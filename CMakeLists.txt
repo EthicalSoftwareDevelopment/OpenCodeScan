@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.24)
-project(OpenCodeScan VERSION 0.2.0 LANGUAGES CXX)
+project(OpenCodeScan VERSION 0.3.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -28,12 +28,20 @@ set(OPEN_CODE_SCAN_CORE_SOURCES
         src/analysis/DeterministicAnalysisEngine.cpp
         src/analysis/ProjectFileDiscoverer.hpp
         src/analysis/ProjectFileDiscoverer.cpp
+        src/analysis/rules/IRule.hpp
+        src/analysis/rules/RuleRegistry.hpp
+        src/analysis/rules/RuleRegistry.cpp
         src/core/Diagnostic.hpp
         src/core/IAnalysisEngine.hpp
+        src/core/IReportExporter.hpp
         src/core/Logging.hpp
         src/core/Logging.cpp
         src/core/SettingsService.hpp
         src/core/SettingsService.cpp
+        src/reporting/JsonReportExporter.hpp
+        src/reporting/JsonReportExporter.cpp
+        src/reporting/HtmlReportExporter.hpp
+        src/reporting/HtmlReportExporter.cpp
         src/ui/DiagnosticsTableModel.hpp
         src/ui/DiagnosticsTableModel.cpp
         src/ui/MainWindow.hpp

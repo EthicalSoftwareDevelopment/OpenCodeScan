@@ -13,6 +13,7 @@
 #include <QMetaObject>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTableView>
@@ -24,6 +25,8 @@
 #include "core/IAnalysisEngine.hpp"
 #include "core/Logging.hpp"
 #include "core/SettingsService.hpp"
+#include "reporting/HtmlReportExporter.hpp"
+#include "reporting/JsonReportExporter.hpp"
 #include "ui/DiagnosticsTableModel.hpp"
 namespace {
 QString formatDiagnosticDetails(const opencodescan::Diagnostic& diagnostic) {
@@ -61,8 +64,8 @@ MainWindow::~MainWindow() {
     }
 }
 void MainWindow::setupUi() {
-    setWindowTitle(QStringLiteral("OpenCodeScan - Phase 2 Core"));
-    resize(1280, 820);
+    setWindowTitle(QStringLiteral("OpenCodeScan - Phase 3 Rules MVP"));
+    resize(1320, 860);
     auto* centralWidget = new QWidget(this);
     auto* rootLayout = new QVBoxLayout(centralWidget);
     auto* configurationGroup = new QGroupBox(QStringLiteral("Scan Configuration"), centralWidget);
@@ -71,13 +74,20 @@ void MainWindow::setupUi() {
     includePathsEdit_ = new QLineEdit(configurationGroup);
     definesEdit_ = new QLineEdit(configurationGroup);
     excludedPathsEdit_ = new QLineEdit(configurationGroup);
+    enabledRulesEdit_ = new QLineEdit(configurationGroup);
     browseButton_ = new QPushButton(QStringLiteral("Browse..."), configurationGroup);
     startScanButton_ = new QPushButton(QStringLiteral("Start Scan"), configurationGroup);
     cancelScanButton_ = new QPushButton(QStringLiteral("Cancel"), configurationGroup);
+    exportJsonButton_ = new QPushButton(QStringLiteral("Export JSON"), configurationGroup);
+    exportHtmlButton_ = new QPushButton(QStringLiteral("Export HTML"), configurationGroup);
     cancelScanButton_->setEnabled(false);
+    exportJsonButton_->setEnabled(false);
+    exportHtmlButton_->setEnabled(false);
     includePathsEdit_->setPlaceholderText(QStringLiteral("Semicolon-separated include paths"));
     definesEdit_->setPlaceholderText(QStringLiteral("Semicolon-separated defines (e.g. DEBUG;WIN32)"));
     excludedPathsEdit_->setPlaceholderText(QStringLiteral("Semicolon-separated excluded paths"));
+    enabledRulesEdit_->setPlaceholderText(QStringLiteral("Semicolon-separated rule IDs"));
+    enabledRulesEdit_->setToolTip(availableRulesTooltip());
     configurationLayout->addWidget(new QLabel(QStringLiteral("Project root:"), configurationGroup), 0, 0);
     configurationLayout->addWidget(projectPathEdit_, 0, 1);
     configurationLayout->addWidget(browseButton_, 0, 2);
@@ -87,9 +97,13 @@ void MainWindow::setupUi() {
     configurationLayout->addWidget(definesEdit_, 2, 1, 1, 2);
     configurationLayout->addWidget(new QLabel(QStringLiteral("Excluded paths:"), configurationGroup), 3, 0);
     configurationLayout->addWidget(excludedPathsEdit_, 3, 1, 1, 2);
-    configurationLayout->addWidget(startScanButton_, 4, 1);
-    configurationLayout->addWidget(cancelScanButton_, 4, 2);
-    summaryLabel_ = new QLabel(QStringLiteral("Choose a project and start a deterministic scan to prepare translation units."), centralWidget);
+    configurationLayout->addWidget(new QLabel(QStringLiteral("Enabled rules:"), configurationGroup), 4, 0);
+    configurationLayout->addWidget(enabledRulesEdit_, 4, 1, 1, 2);
+    configurationLayout->addWidget(startScanButton_, 5, 1);
+    configurationLayout->addWidget(cancelScanButton_, 5, 2);
+    configurationLayout->addWidget(exportJsonButton_, 6, 1);
+    configurationLayout->addWidget(exportHtmlButton_, 6, 2);
+    summaryLabel_ = new QLabel(QStringLiteral("Choose a project, select Phase 3 rules, and start a deterministic scan to produce actionable diagnostics."), centralWidget);
     summaryLabel_->setWordWrap(true);
     progressLabel_ = new QLabel(QStringLiteral("Idle"), centralWidget);
     progressBar_ = new QProgressBar(centralWidget);
@@ -109,7 +123,7 @@ void MainWindow::setupUi() {
     diagnosticsView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     detailsView_ = new QTextEdit(centralWidget);
     detailsView_->setReadOnly(true);
-    detailsView_->setPlaceholderText(QStringLiteral("Select a diagnostic to inspect details, or run a scan to see scan notes."));
+    detailsView_->setPlaceholderText(QStringLiteral("Select a diagnostic to inspect details, or run a scan to see scan notes and export the results."));
     auto* splitter = new QSplitter(Qt::Vertical, centralWidget);
     splitter->addWidget(diagnosticsView_);
     splitter->addWidget(detailsView_);
@@ -126,6 +140,8 @@ void MainWindow::setupUi() {
     connect(browseButton_, &QPushButton::clicked, this, [this]() { browseForProject(); });
     connect(startScanButton_, &QPushButton::clicked, this, [this]() { startScan(); });
     connect(cancelScanButton_, &QPushButton::clicked, this, [this]() { cancelScan(); });
+    connect(exportJsonButton_, &QPushButton::clicked, this, [this]() { exportJsonReport(); });
+    connect(exportHtmlButton_, &QPushButton::clicked, this, [this]() { exportHtmlReport(); });
     connect(scanWatcher_, &QFutureWatcher<opencodescan::AnalysisResult>::finished, this, [this]() { handleScanFinished(); });
     connect(diagnosticsView_->selectionModel(),
             &QItemSelectionModel::currentRowChanged,
@@ -140,12 +156,25 @@ void MainWindow::restoreSettings() {
     includePathsEdit_->setText(settingsService_.scanIncludePaths().join(QStringLiteral(";")));
     definesEdit_->setText(settingsService_.scanDefines().join(QStringLiteral(";")));
     excludedPathsEdit_->setText(settingsService_.excludedPaths().join(QStringLiteral(";")));
+    const auto enabledRuleIds = settingsService_.enabledRuleIds();
+    if (enabledRuleIds.isEmpty()) {
+        QStringList defaultRuleIds;
+        for (const auto& rule : analysisEngine_.availableRules()) {
+            if (rule.enabledByDefault) {
+                defaultRuleIds << rule.id;
+            }
+        }
+        enabledRulesEdit_->setText(defaultRuleIds.join(QStringLiteral(";")));
+    } else {
+        enabledRulesEdit_->setText(enabledRuleIds.join(QStringLiteral(";")));
+    }
 }
 void MainWindow::persistSettings() {
     settingsService_.setLastProjectPath(projectPathEdit_->text().trimmed());
     settingsService_.setScanIncludePaths(parseMultiValue(includePathsEdit_->text()));
     settingsService_.setScanDefines(parseMultiValue(definesEdit_->text()));
     settingsService_.setExcludedPaths(parseMultiValue(excludedPathsEdit_->text()));
+    settingsService_.setEnabledRuleIds(parseMultiValue(enabledRulesEdit_->text()));
 }
 void MainWindow::browseForProject() {
     const auto initialDirectory = projectPathEdit_->text().trimmed().isEmpty()
@@ -174,15 +203,17 @@ void MainWindow::startScan() {
     scanInProgress_ = true;
     startScanButton_->setEnabled(false);
     cancelScanButton_->setEnabled(true);
+    exportJsonButton_->setEnabled(false);
+    exportHtmlButton_->setEnabled(false);
     progressBar_->setRange(0, 0);
     progressLabel_->setText(QStringLiteral("Preparing scan..."));
-    summaryLabel_->setText(QStringLiteral("Preparing deterministic analysis core..."));
+    summaryLabel_->setText(QStringLiteral("Preparing Phase 3 rule execution..."));
     diagnosticsModel_->clearDiagnostics();
     detailsView_->clear();
     statusBar()->showMessage(QStringLiteral("Scan started"));
     cancelToken_ = std::make_shared<std::atomic_bool>(false);
     const auto request = buildRequestFromUi();
-    opencodescan::Logger::info(QStringLiteral("Starting deterministic analysis scan for %1").arg(request.projectRootPath));
+    opencodescan::Logger::info(QStringLiteral("Starting Phase 3 analysis scan for %1").arg(request.projectRootPath));
     const auto progressCallback = [this](const opencodescan::ScanProgress& progress) {
         QMetaObject::invokeMethod(this,
                                   [this, progress]() { handleScanProgress(progress); },
@@ -200,15 +231,21 @@ void MainWindow::cancelScan() {
     progressLabel_->setText(QStringLiteral("Cancellation requested..."));
     statusBar()->showMessage(QStringLiteral("Cancellation requested"));
 }
+void MainWindow::exportJsonReport() {
+    exportReport(false);
+}
+void MainWindow::exportHtmlReport() {
+    exportReport(true);
+}
 void MainWindow::handleScanFinished() {
     scanInProgress_ = false;
     startScanButton_->setEnabled(true);
     cancelScanButton_->setEnabled(false);
     const auto result = scanWatcher_->result();
     showAnalysisResult(result);
-    opencodescan::Logger::info(QStringLiteral("Deterministic scan finished for %1 with %2 translation units.")
+    opencodescan::Logger::info(QStringLiteral("Phase 3 scan finished for %1 with %2 rule diagnostics.")
                                    .arg(projectPathEdit_->text().trimmed())
-                                   .arg(result.summary.translationUnitCount));
+                                   .arg(result.summary.emittedRuleDiagnostics));
 }
 void MainWindow::handleScanProgress(const opencodescan::ScanProgress& progress) {
     progressLabel_->setText(QStringLiteral("%1 - %2")
@@ -228,12 +265,15 @@ void MainWindow::handleScanProgress(const opencodescan::ScanProgress& progress) 
     }
 }
 void MainWindow::showAnalysisResult(const opencodescan::AnalysisResult& result) {
+    lastResult_ = result;
     diagnosticsModel_->setDiagnostics(result.diagnostics);
     summaryLabel_->setText(formatSummaryText(result));
     progressBar_->setRange(0, result.summary.discoveredFileCount > 0 ? result.summary.discoveredFileCount : 1);
     progressBar_->setValue(result.summary.translationUnitCount > 0 ? result.summary.translationUnitCount : 0);
     progressLabel_->setText(result.summary.cancelled ? QStringLiteral("Cancelled") : QStringLiteral("Completed"));
     detailsView_->setPlainText(formatNotes(result.notes));
+    exportJsonButton_->setEnabled(true);
+    exportHtmlButton_->setEnabled(true);
     if (diagnosticsModel_->rowCount() > 0) {
         diagnosticsView_->selectRow(0);
         updateDiagnosticDetails(diagnosticsModel_->index(0, 0), {});
@@ -253,6 +293,7 @@ opencodescan::AnalysisRequest MainWindow::buildRequestFromUi() const {
     request.includePaths = parseMultiValue(includePathsEdit_->text());
     request.defines = parseMultiValue(definesEdit_->text());
     request.excludedPaths = parseMultiValue(excludedPathsEdit_->text());
+    request.enabledRuleIds = parseMultiValue(enabledRulesEdit_->text());
     request.preferCompileCommands = true;
     return request;
 }
@@ -268,11 +309,49 @@ QStringList MainWindow::parseMultiValue(const QString& text) const {
     return values;
 }
 QString MainWindow::formatSummaryText(const opencodescan::AnalysisResult& result) const {
-    return QStringLiteral("Project: %1\nDiscovered files: %2 | Translation units: %3 | compile_commands entries: %4 | Uncovered files: %5%6")
+    return QStringLiteral("Project: %1\nDiscovered files: %2 | Translation units: %3 | Executed rules: %4 | Rule diagnostics: %5 | compile_commands entries: %6 | Uncovered files: %7%8")
         .arg(projectPathEdit_->text().trimmed())
         .arg(result.summary.discoveredFileCount)
         .arg(result.summary.translationUnitCount)
+        .arg(result.summary.executedRuleCount)
+        .arg(result.summary.emittedRuleDiagnostics)
         .arg(result.summary.compileCommandEntryCount)
         .arg(result.summary.filesWithoutCompileCommands)
         .arg(result.summary.cancelled ? QStringLiteral(" | Status: Cancelled") : QStringLiteral(" | Status: Completed"));
+}
+QString MainWindow::availableRulesTooltip() const {
+    QStringList entries;
+    for (const auto& rule : analysisEngine_.availableRules()) {
+        entries << QStringLiteral("%1 - %2 (%3)").arg(rule.id, rule.name, opencodescan::toDisplayString(rule.category));
+    }
+    return entries.join(QStringLiteral("\n"));
+}
+bool MainWindow::exportReport(const bool exportHtml) {
+    if (lastResult_.projectRootPath.isEmpty()) {
+        QMessageBox::information(this,
+                                 QStringLiteral("No scan results"),
+                                 QStringLiteral("Run a scan before exporting a report."));
+        return false;
+    }
+    const auto defaultExtension = exportHtml ? QStringLiteral("html") : QStringLiteral("json");
+    const auto filter = exportHtml ? QStringLiteral("HTML report (*.html)") : QStringLiteral("JSON report (*.json)");
+    const auto filePath = QFileDialog::getSaveFileName(this,
+                                                       exportHtml ? QStringLiteral("Export HTML report") : QStringLiteral("Export JSON report"),
+                                                       QDir(lastResult_.projectRootPath).filePath(QStringLiteral("OpenCodeScan-report.%1").arg(defaultExtension)),
+                                                       filter);
+    if (filePath.isEmpty()) {
+        return false;
+    }
+    QString errorMessage;
+    const bool success = exportHtml
+        ? opencodescan::HtmlReportExporter {}.exportReport(lastResult_, filePath, &errorMessage)
+        : opencodescan::JsonReportExporter {}.exportReport(lastResult_, filePath, &errorMessage);
+    if (!success) {
+        QMessageBox::critical(this,
+                              QStringLiteral("Export failed"),
+                              errorMessage.isEmpty() ? QStringLiteral("Unable to export the report.") : errorMessage);
+        return false;
+    }
+    statusBar()->showMessage(QStringLiteral("Exported report to %1").arg(QDir::cleanPath(filePath)), 5000);
+    return true;
 }

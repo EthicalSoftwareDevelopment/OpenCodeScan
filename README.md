@@ -2,6 +2,8 @@
 
 Qt-based desktop static analysis tool for C/C++ projects.
 
+![Phase 3 Feature](docs/images/feat-phase3.png)
+
 ## Current Status
 Phase 3 is implemented: the repository now includes a deterministic analysis core, a built-in rule registry with MVP text-based rules, JSON/HTML report export, persistent rule selection, a Qt desktop workflow for running scans and exporting results, and unit tests.
 
